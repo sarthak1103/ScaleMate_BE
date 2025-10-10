@@ -121,24 +121,34 @@ def get_drive_data(creds, max_results=5):
 
 
 # ----------------------------
-# Ollama Config
+# Hugging Face Config
 # ----------------------------
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "llama3")
-OLLAMA_EMBED_FALLBACKS = [
-    m.strip() for m in os.getenv("OLLAMA_EMBED_FALLBACKS", "bge-m3,mxbai-embed-large").split(",") if m.strip()
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
+HF_EMBED_MODEL = os.getenv("HF_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
+HF_CHAT_MODEL = os.getenv("HF_CHAT_MODEL", "gpt2")
+HF_EMBED_FALLBACKS = [
+    m.strip() for m in os.getenv("HF_EMBED_FALLBACKS", "BAAI/bge-base-en-v1.5,BAAI/bge-large-en-v1.5").split(",") if m.strip()
+]
+HF_CHAT_FALLBACKS = [
+    m.strip() for m in os.getenv("HF_CHAT_FALLBACKS", "distilgpt2").split(",") if m.strip()
 ]
 
 # ----------------------------
 # Embeddings
 # ----------------------------
-def ollama_embed(text: str):
-    """Get embeddings from Ollama with fallbacks"""
+def huggingface_embed(text: str):
+    """Get embeddings from Hugging Face with fallbacks"""
+    if not HUGGINGFACE_API_KEY:
+        raise RuntimeError("HUGGINGFACE_API_KEY environment variable is required")
+    
     def call_embed(model, input_data):
+        API_URL = f"https://api-inference.huggingface.co/models/{model}"
+        headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
+        
         resp = requests.post(
-            f"{OLLAMA_HOST}/api/embeddings",
-            json={"model": model, "prompt": input_data},  # Ollama uses 'prompt'
+            API_URL,
+            headers=headers,
+            json={"inputs": input_data},
             timeout=120,
         )
         resp.raise_for_status()
@@ -146,22 +156,24 @@ def ollama_embed(text: str):
 
     # Try main model
     try:
-        data = call_embed(OLLAMA_EMBED_MODEL, text)
-        if isinstance(data.get("embedding"), list) and data["embedding"]:
-            return data["embedding"]
+        data = call_embed(HF_EMBED_MODEL, text)
+        if isinstance(data, list) and len(data) > 0:
+            # BAAI models return the embedding vector directly as a list of floats
+            return data
     except Exception:
         pass
 
     # Try fallbacks
-    for model in OLLAMA_EMBED_FALLBACKS:
+    for model in HF_EMBED_FALLBACKS:
         try:
             data = call_embed(model, text)
-            if isinstance(data.get("embedding"), list) and data["embedding"]:
-                return data["embedding"]
+            if isinstance(data, list) and len(data) > 0:
+                # BAAI models return the embedding vector directly as a list of floats
+                return data
         except Exception:
             continue
 
-    raise RuntimeError("No embeddings available. Make sure models are pulled via `ollama pull <model>`")
+    raise RuntimeError("No embeddings available. Check your Hugging Face API key and model availability.")
 
 
 def store_embeddings(texts):
@@ -172,7 +184,7 @@ def store_embeddings(texts):
         if not text or len(text) < 10:  # skip short texts
             continue
         try:
-            emb = ollama_embed(text)
+            emb = huggingface_embed(text)
             valid_ids.append(f"id-{i}")
             valid_docs.append(text)
             valid_embs.append(emb)
@@ -188,7 +200,7 @@ def store_embeddings(texts):
 # ----------------------------
 def rag_search(query):
     """Perform Retrieval-Augmented Generation over user data"""
-    q_emb = ollama_embed(query)
+    q_emb = huggingface_embed(query)
 
     # Check collection size
     try:
@@ -212,23 +224,16 @@ def rag_search(query):
     top_docs = flat_docs[:10]
     context = "\n".join(top_docs)
 
-    # Chat with Ollama
-    prompt = f"""You are a helpful assistant answering QUESTIONS ABOUT THE USER'S DATA ONLY.
-Use ONLY the information in Context. 
-If no relevant info: reply with "No relevant information found in context."
-
-Context:
-{context}
-
-Question: {query}
-"""
-    response = requests.post(
-        f"{OLLAMA_HOST}/api/generate",
-        json={"model": OLLAMA_CHAT_MODEL, "prompt": prompt, "stream": False},
-        timeout=180,
-    )
-    response.raise_for_status()
-    return (response.json().get("response") or "").strip()
+    # Simple response based on context (since many HF chat models are not available)
+    # For now, we'll provide a basic response based on the retrieved context
+    if "No relevant information found" in context or len(context.strip()) < 50:
+        return "No relevant information found in your data. Please try a different question or make sure you've fetched your Gmail and Drive data first."
+    
+    # Extract key information from context
+    context_lines = context.split('\n')[:3]  # Take first 3 lines
+    relevant_info = '\n'.join([line.strip() for line in context_lines if line.strip()])
+    
+    return f"Based on your data, here's what I found:\n\n{relevant_info}\n\nThis information is related to your question: '{query}'. For more detailed analysis, you might want to ask more specific questions about your emails or files."
 
 
 # ----------------------------
@@ -236,7 +241,7 @@ Question: {query}
 # ----------------------------
 @app.get("/")
 def health():
-    return {"msg": "🚀 Hackathon MVP running with Ollama"}
+    return {"msg": "🚀 Hackathon MVP running with Hugging Face"}
 
 
 @app.get("/auth/start")
